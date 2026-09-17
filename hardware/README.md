@@ -71,8 +71,9 @@ portable to any tool you already use.
 3. Assemble from `bom.md`.
 4. Flash the firmware (ICSP or UART header) — same `.ino` as the breadboard
    version.
-5. Re-engineer the constants (`LOCK_FRAME_*`, `WINDOWS[]`) for the vehicle
-   before trusting it on an actual car. See root README.
+5. Re-engineer the constants (`LOCK_FRAME_*`, `DOOR_FRAME_*`, `HAZARD_FRAME_*`,
+   `WINDOWS_UP[]`/`WINDOWS_DOWN[]`) for the vehicle before trusting it on an
+   actual car. See root README.
 
 > ⚠️ Same safety warnings as the firmware README apply — especially pinch
 > protection and correct CAN termination. Tapping OBD-II pin 6/14 is the

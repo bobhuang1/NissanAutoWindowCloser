@@ -7,6 +7,10 @@
  *   1. Detect "ACC power off"  (12V signal on a voltage divider, pin A0)
  *      and/or a "door lock" event sniffed on the CAN bus.
  *   2. When either happens, send CAN frames that command all 4 windows to close.
+ *   3. Detect any door / trunk / rear-hatch open -> switch on the hazard lights,
+ *      and switch them back off once everything is closed.
+ *   4. If 3 "unlock" signals arrive within 3 s while the car is parked/locked,
+ *      roll all 4 windows down automatically.
  *
  * WARNING — sample / proof-of-concept only.
  *   The CAN frame IDs and payload bytes below are PLACEHOLDERS. They are NOT
@@ -51,19 +55,43 @@
 #define CLOSE_DELAY_MS    1500UL               // delay AFTER the trigger before closing
 #define CLOSE_SPACING_MS  250UL                // pause between window frames
 #define SEND_RETRIES      3                    // retries per frame if transmission fails
-#define EVENT_COOLDOWN_MS 10000UL              // minimum gap between automatic closes
+#define EVENT_COOLDOWN_MS 10000UL              // minimum gap between automatic close/roll-downs
 #define AUTO_CLOSE_AT_BOOT 0                   // 1 = close even if ACC already OFF at boot
 
 /* --- Event sources ---------------------------------------------------------- */
 #define TRIGGER_ACC_OFF   1                    // close when ACC switches OFF
 #define TRIGGER_DOOR_LOCK 1                    // close when a lock frame arrives while ACC OFF
+#define TRIGGER_HAZARD_ON_DOOR 1               // hazards while any door/trunk is open (parked)
+#define TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK 1   // 3 unlocks in <3 s -> all windows down
 
-/* --- Door lock event sniffed on the bus (placeholder values!) ----------------- */
+/* --- Door lock / unlock event (placeholder values!) --------------------------- */
 #define LOCK_FRAME_ID     0x2A2UL              // placeholder: BCM door lock frame
 #define LOCK_FRAME_EXT    0                    // 0 = standard ID, 1 = extended
 #define LOCK_BYTE         1                    // byte index to inspect
 #define LOCK_MASK         0x03                 // bit mask on that byte
-#define LOCK_VALUE        0x01                 // 0x01 = "locked" (placeholder)
+#define LOCK_VALUE        0x01                 // 0x01 = "locked"   (placeholder)
+#define UNLOCK_VALUE      0x02                 // 0x02 = "unlocked" (placeholder)
+
+/* --- Roll windows down after a triple unlock -------------------------------- */
+#define TRIPLE_UNLOCK_WINDOW_MS 3000UL         // 3 unlocks inside this window -> roll down
+#define ROLL_DOWN_DELAY_MS    1000UL           // delay AFTER the 3rd unlock
+#define ROLL_DOWN_SPACING_MS  250UL            // pause between window-down frames
+
+/* --- Door / tailgate open sensing (placeholder values!) ---------------------- */
+#define DOOR_FRAME_ID     0x1B9UL              // placeholder: BCM door/tailgate status frame
+#define DOOR_FRAME_EXT    0
+#define DOOR_BYTE0        0                    // low byte  of the door bitfield
+#define DOOR_BYTE1        1                    // high byte of the door bitfield
+#define DOOR_BITS         0x000F               // FL|FR|RL|RR, add a bit for the tailgate (placeholder)
+#define DOOR_DEBOUNCE_MS  150UL                // door-switch debounce
+#define HAZARD_ONLY_WHEN_PARKED 1              // 1 = hazard only while ACC is OFF
+
+/* --- Hazard lights command (placeholder values!) ----------------------------- */
+#define HAZARD_FRAME_ID   0x4B2UL              // placeholder: BCM hazard request ID
+#define HAZARD_FRAME_EXT  0
+#define HAZARD_DLC        8
+#define HAZARD_ON_DATA    { 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00 }  // placeholder
+#define HAZARD_OFF_DATA   { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }  // placeholder
 
 /* --- STATUS / debug ---------------------------------------------------------- */
 #define STATUS_LED        9                    // integrated PCB LED2 -> PB1/D9 (NOT D13, that is SPI SCK!)
@@ -71,9 +99,9 @@
 #define ledOn()           digitalWrite(STATUS_LED, LED_ACTIVE_HIGH ? HIGH : LOW)
 #define ledOff()          digitalWrite(STATUS_LED, LED_ACTIVE_HIGH ? LOW  : HIGH)
 
-/* ==================== WINDOW "CLOSE" FRAME TABLE =============================
+/* ==================== WINDOW FRAME TABLES ====================================
  * PLACEHOLDERS! For a real Sylphy these must be replaced with frames recorded
- * from the car's own bus while the windows actually close (see README).
+ * from the car's own bus while the windows actually move (see README).
  * `ext` marks an extended (29-bit) ID: 1 = extended, 0 = standard.
  * ============================================================================*/
 typedef struct {
@@ -82,15 +110,27 @@ typedef struct {
   uint8_t     ext;                  // 0 standard / 1 extended
   uint8_t     dlc;                  // payload length (<= 8)
   uint8_t     data[8];              // payload bytes
-} WinClose;
+} WinFrame;
 
-static const WinClose WINDOWS[] = {
+/* Windows UP ("close") — used by the auto-close triggers. */
+static const WinFrame WINDOWS_UP[] = {
   { "FL", 0x180UL, 0, 8, {0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00} }, // driver
   { "FR", 0x181UL, 0, 8, {0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00} }, // passenger
   { "RL", 0x182UL, 0, 8, {0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00} }, // rear left
   { "RR", 0x183UL, 0, 8, {0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00} }, // rear right
 };
-#define NUM_WINDOWS  (sizeof(WINDOWS) / sizeof(WINDOWS[0]))
+#define NUM_WINDOWS_UP  (sizeof(WINDOWS_UP) / sizeof(WINDOWS_UP[0]))
+
+/* Windows DOWN ("open/roll down") — used by the triple-unlock trigger. */
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static const WinFrame WINDOWS_DOWN[] = {
+  { "FL", 0x180UL, 0, 8, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00} }, // driver
+  { "FR", 0x181UL, 0, 8, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00} }, // passenger
+  { "RL", 0x182UL, 0, 8, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00} }, // rear left
+  { "RR", 0x183UL, 0, 8, {0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00} }, // rear right
+};
+#define NUM_WINDOWS_DOWN (sizeof(WINDOWS_DOWN) / sizeof(WINDOWS_DOWN[0]))
+#endif
 
 /* ============================== STATE ======================================== */
 MCP_CAN CAN0(SPI_CS_PIN);
@@ -101,6 +141,24 @@ static const char  *_closeReason  = nullptr;    // reason for the pending close
 
 static bool _accOn          = false;            // last stable ACC state
 static unsigned long _accLowSinceMs = 0;        // when the ACC reading first went low
+
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static unsigned long _openAtMs   = 0;           // pending roll-down timer
+static const char  *_openReason  = nullptr;     // reason for the pending roll-down
+#endif
+
+#if TRIGGER_DOOR_LOCK || TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static bool _carLocked          = false;        // last lock/unlock on the bus
+static uint8_t   _unlockCount   = 0;            // unlock burst counter
+static unsigned long _unlockWindowStartMs = 0;  // when the first unlock landed
+#endif
+
+#if TRIGGER_HAZARD_ON_DOOR
+static bool _doorsOpen            = false;      // debounced door/tailgate state
+static bool _doorDebouncePending  = false;      // edge seen, debounce running
+static unsigned long _doorsChangeAtMs = 0;
+static bool _hazardsOn            = false;      // last hazard command we TX'd
+#endif
 
 static uint8_t  _rxLen;
 static uint8_t  _rxData[8];
@@ -125,9 +183,15 @@ void setup() {
   }
 
   Serial.print(F("ACC idle threshold: ")); Serial.print(ACC_OFF_MV); Serial.println(F(" mV"));
-  Serial.print(F("Lock frame: 0x"));
-  Serial.println(LOCK_FRAME_ID, HEX);
-  Serial.print(F("Window frames: ")); Serial.println(NUM_WINDOWS);
+  Serial.print(F("Lock frame: 0x")); Serial.println(LOCK_FRAME_ID, HEX);
+  Serial.print(F("Window up frames: "));   Serial.println(NUM_WINDOWS_UP);
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+  Serial.print(F("Window down frames: ")); Serial.println(NUM_WINDOWS_DOWN);
+#endif
+#if TRIGGER_HAZARD_ON_DOOR
+  Serial.print(F("Door status frame: 0x")); Serial.println(DOOR_FRAME_ID, HEX);
+  Serial.print(F("Hazard frame: 0x"));      Serial.println(HAZARD_FRAME_ID, HEX);
+#endif
 
   // Initial state, so we can detect a falling edge later.
   _accOn = (readAccMv() >= ACC_OFF_MV);
@@ -142,9 +206,12 @@ void setup() {
 
 /* ================================= LOOP ====================================== */
 void loop() {
-  readCanPipe();        // keep ears open (door-lock events)
+  readCanPipe();        // keep ears open (lock / door-lock events)
   pollAcc();            // ACC power-off events
   runPendingClose();    // fire the delayed close if it is due
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+  runPendingRollDown(); // fire the delayed roll-down if it is due
+#endif
   handleSerial();       // manual test commands over USB
 }
 
@@ -163,38 +230,134 @@ static void pollAcc() {
 #if TRIGGER_ACC_OFF
         scheduleClose(F("ACC off"));
 #endif
+#if TRIGGER_HAZARD_ON_DOOR
+        // Doors may already be open from while the ACC was running — light up now.
+        if (_doorsOpen) setHazards(true);
+#endif
       }
     } else {
       _accLowSinceMs = 0;
       _accOn = true;
       Serial.println(F("ACC: ON"));
+#if TRIGGER_HAZARD_ON_DOOR
+      setHazards(false);                        // parking light job is done
+#endif
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+      _unlockCount = 0;                         // a fresh drive resets the unlock burst
+#endif
     }
   } else if (on) {
     _accLowSinceMs = 0;                          // stay primed for the next drop
   }
 }
 
-/* CAN receive pipe: inspect every frame for the door-lock event signature. */
+/* CAN receive pipe: dispatch every frame to the event handlers above. */
 static void readCanPipe() {
   if (CAN0.checkReceive() != CAN_MSGAVAIL) return;
 
   CAN0.readMsgBufID(&_rxFrameId, &_rxLen, _rxData);
 
+#if TRIGGER_DOOR_LOCK || TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+  handleLockFrame();
+#endif
+#if TRIGGER_HAZARD_ON_DOOR
+  handleDoorFrame();
+#endif
+}
+
+/* --- Door lock / unlock frames ------------------------------------------------ */
+#if TRIGGER_DOOR_LOCK || TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static void handleLockFrame() {
+  if (!frameIdMatches(LOCK_FRAME_ID, LOCK_FRAME_EXT)) return;
+  if (_rxLen <= LOCK_BYTE) return;
+
+  uint8_t code = _rxData[LOCK_BYTE] & LOCK_MASK;
+
+  if (code == LOCK_VALUE) {
+    _carLocked = true;
+    _unlockCount = 0;                            // fresh lock resets the burst counter
+    Serial.println(F("Door lock event"));
+
 #if TRIGGER_DOOR_LOCK
-  // readMsgBufID(3-arg) flags an extended ID in bit31; normalize both to compare.
-  uint32_t frameId = _rxFrameId & 0x1FFFFFFFUL;
-  bool frameIsExt  = (_rxFrameId & 0x80000000UL) != 0;
+    // Only react while the car is off: a lock event while driving shouldn't close windows.
+    if (!_accOn) {
+      Serial.println(F("Door-lock event while ACC off -> close"));
+      scheduleClose(F("door lock"));
+    }
+#endif
+  }
+  else if (code == UNLOCK_VALUE) {
+    _carLocked = false;                          // latch unlocked
+    Serial.println(F("Door unlock event"));
 
-  bool matchesId  = (frameId == LOCK_FRAME_ID) && (frameIsExt == (LOCK_FRAME_EXT != 0));
-  bool isLocked   = (matchesId && _rxLen > LOCK_BYTE && ((_rxData[LOCK_BYTE] & LOCK_MASK) == LOCK_VALUE));
-
-  // Only react while the car is off: a lock event while driving shouldn't close windows.
-  if (isLocked && !_accOn) {
-    Serial.println(F("Door-lock event while ACC off -> close"));
-    scheduleClose(F("door lock"));
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+    handleUnlockBurst();
+#endif
   }
 #endif
 }
+
+/* 3 unlocks inside TRIPLE_UNLOCK_WINDOW_MS -> roll down the windows. */
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static void handleUnlockBurst() {
+  if (_accOn) return;                            // parked / off only
+
+  unsigned long now = millis();
+  if (_unlockCount == 0 || now - _unlockWindowStartMs > TRIPLE_UNLOCK_WINDOW_MS) {
+    _unlockWindowStartMs = now;                  // start a fresh window with this event
+    _unlockCount = 1;
+  } else {
+    _unlockCount++;
+  }
+
+  Serial.print(F("Unlock burst: ")); Serial.println(_unlockCount);
+
+  if (_unlockCount >= 3) {
+    _unlockCount = 0;
+    Serial.println(F("Triple unlock detected -> roll windows down"));
+    scheduleRollDown(F("triple unlock"));
+  }
+}
+#endif
+
+/* --- Door / tailgate status frames ---------------------------------------------- */
+#if TRIGGER_HAZARD_ON_DOOR
+static void handleDoorFrame() {
+  if (!frameIdMatches(DOOR_FRAME_ID, DOOR_FRAME_EXT)) return;
+  if (_rxLen <= DOOR_BYTE1) return;
+
+  uint16_t openMask = (uint16_t)_rxData[DOOR_BYTE0]
+                    | ((uint16_t)_rxData[DOOR_BYTE1] << 8);
+  bool anyOpen = (openMask & DOOR_BITS) != 0;
+
+  // Same value as the debounced state -> done, restart any running debounce.
+  if (anyOpen == _doorsOpen) {
+    _doorDebouncePending = false;
+    return;
+  }
+
+  if (!_doorDebouncePending) {
+    _doorsChangeAtMs = millis();
+    _doorDebouncePending = true;
+    return;
+  }
+  if (millis() - _doorsChangeAtMs < DOOR_DEBOUNCE_MS) return;
+
+  _doorDebouncePending = false;
+  _doorsOpen = anyOpen;
+  Serial.println(_doorsOpen ? F("Door/tailgate OPEN") : F("Door/tailgate CLOSED"));
+
+  if (_doorsOpen) {
+    if (HAZARD_ONLY_WHEN_PARKED && _accOn) {
+      Serial.println(F("(parked-only: hazards skipped while driving)"));
+    } else {
+      setHazards(true);
+    }
+  } else {
+    setHazards(false);
+  }
+}
+#endif
 
 /* ================================= ACTIONS =================================== */
 
@@ -215,6 +378,32 @@ static void scheduleClose(const char *reason) {
   Serial.println(F(")"));
 }
 
+/* Schedule one roll-down, also gated by the shared EVENT_COOLDOWN_MS. */
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static void scheduleRollDown(const char *reason) {
+  unsigned long now = millis();
+  if (now < _nextEventMs) {
+    Serial.println(F("(cooldown active, skipping)"));
+    return;
+  }
+  _nextEventMs = now + EVENT_COOLDOWN_MS;
+  _openAtMs    = now + ROLL_DOWN_DELAY_MS;
+  _openReason  = reason;
+  Serial.print(F("Will roll windows down in "));
+  Serial.print(ROLL_DOWN_DELAY_MS);
+  Serial.print(F(" ms  ("));
+  Serial.print(reason);
+  Serial.println(F(")"));
+}
+
+static void runPendingRollDown() {
+  if (_openAtMs == 0) return;
+  if ((long)(millis() - _openAtMs) < 0) return;   // not yet (millis wrap-safe)
+  _openAtMs = 0;
+  openAllWindows(_openReason);
+}
+#endif
+
 static void runPendingClose() {
   if (_closeAtMs == 0) return;
   if ((long)(millis() - _closeAtMs) < 0) return;   // not yet (millis wrap-safe)
@@ -222,43 +411,84 @@ static void runPendingClose() {
   closeAllWindows(_closeReason);
 }
 
-/* Send every "close" frame in WINDOWS[]. All windows even if some fail. */
+/* Send every "up" frame in WINDOWS_UP[]. */
 static void closeAllWindows(const char *reason) {
   Serial.print(F("Closing all windows ("));
   Serial.print(reason ? reason : "manual");
   Serial.println(F(")"));
 
-  for (uint8_t w = 0; w < NUM_WINDOWS; w++) {
-    sendWindowFrame(w);
+  for (uint8_t w = 0; w < NUM_WINDOWS_UP; w++) {
+    const WinFrame &wf = WINDOWS_UP[w];
+    sendFrame(wf.id, wf.ext, wf.dlc, wf.data, wf.name);
     delay(CLOSE_SPACING_MS);
   }
   Serial.println(F("Close sequence done"));
 }
 
-static void sendWindowFrame(uint8_t w) {
-  const WinClose &wc = WINDOWS[w];
+/* Send every "down" frame in WINDOWS_DOWN[]. */
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+static void openAllWindows(const char *reason) {
+  Serial.print(F("Rolling all windows down ("));
+  Serial.print(reason ? reason : "manual");
+  Serial.println(F(")"));
+
+  for (uint8_t w = 0; w < NUM_WINDOWS_DOWN; w++) {
+    const WinFrame &wf = WINDOWS_DOWN[w];
+    sendFrame(wf.id, wf.ext, wf.dlc, wf.data, wf.name);
+    delay(ROLL_DOWN_SPACING_MS);
+  }
+  Serial.println(F("Roll-down sequence done"));
+}
+#endif
+
+/* Generic CAN frame sender with retries + status LED confirmation. */
+static bool sendFrame(uint32_t id, uint8_t ext, uint8_t dlc,
+                      const uint8_t *data, const char *what) {
+  uint32_t frameId = ext ? (id | 0x80000000UL) : id;
 
   for (uint8_t attempt = 1; attempt <= SEND_RETRIES; attempt++) {
-    uint32_t frameId = wc.ext ? (wc.id | 0x80000000UL) : wc.id;
-    byte result = CAN0.sendMsgBuf(frameId, wc.ext, wc.dlc, wc.data);
+    byte result = CAN0.sendMsgBuf(frameId, ext, dlc, (INT8U *)data);
 
     if (result == CAN_OK) {
-      Serial.print(F("  sent ")); Serial.print(wc.name);
-      Serial.print(F("  ID=0x"));  Serial.print(wc.id, HEX);
+      Serial.print(F("  sent ")); Serial.print(what);
+      Serial.print(F("  ID=0x")); Serial.print(id, HEX);
       Serial.print(F(" data="));
-      for (uint8_t i = 0; i < wc.dlc; i++) { Serial.print(wc.data[i], HEX); Serial.print(F(" ")); }
+      for (uint8_t i = 0; i < dlc; i++) { Serial.print(data[i], HEX); Serial.print(F(" ")); }
       Serial.println();
       blink(2, 60);                              // status LED confirmation
-      return;
+      return true;
     }
-    Serial.print(F("  tx failed ")); Serial.print(wc.name);
+    Serial.print(F("  tx failed ")); Serial.print(what);
     Serial.print(F(" (attempt ")); Serial.print(attempt); Serial.println(F(")"));
     delay(50);
   }
-  Serial.print(F("  giving up on ")); Serial.println(wc.name);
+  Serial.print(F("  giving up on ")); Serial.println(what);
+  return false;
 }
 
+/* Hazard demand. Sends only on change; BCM keeps the lights while demanded. */
+#if TRIGGER_HAZARD_ON_DOOR
+static void setHazards(bool on) {
+  if (on == _hazardsOn) return;
+
+  static const uint8_t hazOnData[HAZARD_DLC]  = HAZARD_ON_DATA;
+  static const uint8_t hazOffData[HAZARD_DLC] = HAZARD_OFF_DATA;
+
+  sendFrame(HAZARD_FRAME_ID, HAZARD_FRAME_EXT, HAZARD_DLC,
+            on ? hazOnData : hazOffData,
+            on ? "hazards ON" : "hazards OFF");
+  _hazardsOn = on;
+}
+#endif
+
 /* ================================ HELPERS ==================================== */
+
+/* Does the received frame (in _rxFrameId) match an ID/ext pair? */
+static bool frameIdMatches(uint32_t id, uint8_t ext) {
+  uint32_t normId = _rxFrameId & 0x1FFFFFFFUL;          // strip the ext flag bit31
+  bool normExt   = (_rxFrameId & 0x80000000UL) != 0;
+  return (normId == id) && (normExt == (ext != 0));
+}
 
 /* ACC voltage in millivolts (5 V reference, 10-bit ADC). */
 static unsigned long readAccMv() {
@@ -272,7 +502,7 @@ static void blink(uint8_t times, uint16_t halfPeriodMs) {
   }
 }
 
-/* USB serial test harness (handy before wiring the car): send 'c' to close. */
+/* USB serial test harness (handy before wiring the car). */
 static void handleSerial() {
   if (!Serial.available()) return;
 
@@ -282,14 +512,43 @@ static void handleSerial() {
     case 'C':
       closeAllWindows("serial-cmd");
       break;
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+    case 'o':
+    case 'O':
+      openAllWindows("serial-cmd");
+      break;
+#endif
+#if TRIGGER_HAZARD_ON_DOOR
+    case 'd':
+    case 'D':
+      setHazards(true);
+      break;
+    case 'f':
+    case 'F':
+      setHazards(false);
+      break;
+#endif
     case 'a':
     case 'A':
       Serial.print(F("ACC mV: ")); Serial.println(readAccMv());
       break;
+    case 's':
+    case 'S':
+      Serial.print(F("ACC: ")); Serial.println(_accOn ? F("ON") : F("OFF"));
+#if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
+      Serial.print(F("Locked: ")); Serial.println(_carLocked ? F("yes") : F("no"));
+      Serial.print(F("Unlock burst: ")); Serial.println(_unlockCount);
+#endif
+#if TRIGGER_HAZARD_ON_DOOR
+      Serial.print(F("Door/tailgate open: ")); Serial.println(_doorsOpen ? F("yes") : F("no"));
+      Serial.print(F("Hazards TX demand: ")); Serial.println(_hazardsOn ? F("on") : F("off"));
+#endif
+      break;
     case 'h':
     case 'H':
     case '?':
-      Serial.println(F("commands: c=close all windows, a=print ACC mV, ?=help"));
+      Serial.println(F("commands: c=windows up (close), o=windows down (roll), "
+                       "d=hazards on, f=hazards off, a=ACC mV, s=status, ?=help"));
       break;
     default:
       break;
