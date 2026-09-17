@@ -1,0 +1,13 @@
+# PlatformIO
+.pio/
+.vscode/
+*.swp
+
+# Arduino IDE build cache
+*.dia
+.tmp_*
+
+# Editors / OS
+.idea/
+Thumbs.db
+.DS_Store
