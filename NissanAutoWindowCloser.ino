@@ -42,7 +42,7 @@
 /* --- MCP2515 CAN controller ------------------------------------------------ */
 #define SPI_CS_PIN        10
 #define CAN_SPEED         CAN_500KBPS          // Nissan body CAN is 500 kbit/s (verify!)
-#define CAN_CLOCK         MCP_8MHZ             // crystal on YOUR module (8 or 16 MHz)
+#define CAN_CLOCK         MCP_16MHZ            // integrated PCB uses a 16 MHz crystal; the common plug-in module uses 8 MHz -> MCP_8MHZ
 
 /* --- ACC / ignition sensing ------------------------------------------------- */
 #define ACC_SENSE_PIN     A0                   // ACC 12 V via divider -> 0..5 V
@@ -66,7 +66,10 @@
 #define LOCK_VALUE        0x01                 // 0x01 = "locked" (placeholder)
 
 /* --- STATUS / debug ---------------------------------------------------------- */
-#define STATUS_LED        13                   // blinks once per sent frame
+#define STATUS_LED        9                    // integrated PCB LED2 -> PB1/D9 (NOT D13, that is SPI SCK!)
+#define LED_ACTIVE_HIGH   0                    // PCB: LED anode to +5V -> shines when pin is LOW. UNO built-in LED on D13 would be 1.
+#define ledOn()           digitalWrite(STATUS_LED, LED_ACTIVE_HIGH ? HIGH : LOW)
+#define ledOff()          digitalWrite(STATUS_LED, LED_ACTIVE_HIGH ? LOW  : HIGH)
 
 /* ==================== WINDOW "CLOSE" FRAME TABLE =============================
  * PLACEHOLDERS! For a real Sylphy these must be replaced with frames recorded
@@ -264,8 +267,8 @@ static unsigned long readAccMv() {
 
 static void blink(uint8_t times, uint16_t halfPeriodMs) {
   for (uint8_t i = 0; i < times; i++) {
-    digitalWrite(STATUS_LED, HIGH); delay(halfPeriodMs);
-    digitalWrite(STATUS_LED, LOW);  delay(halfPeriodMs);
+    ledOn();  delay(halfPeriodMs);
+    ledOff(); delay(halfPeriodMs);
   }
 }
 
