@@ -116,8 +116,14 @@ J1 pinout (J1962, male — plugs into the car's OBD-II socket or into a cable):
                      └────────────────────────────┴── GND
               (divider node = ACC_SENSE; 12 V drove ~3.8–4.4 V → A0)
 
+   FEATURE : 24 PC1/A1 ◄──── R11 10k ──► +5V        (master-enable pull-up)
+             │
+             J5 2-pin (0.1"): PC1 ⇄ GND
+              J5 CLOSED = all automatic features DISABLED
+              (firmware `MASTER_ENABLE_PIN`; PCB-only — DNP on breadboard)
+
    Power   :  7,20 VCC (+5V) ── C4,C5 100n + C60 10uF
-              8,22 GND; 21 AREF (NC); 24–28 PC1..PC5 (spare)
+              8,22 GND; 21 AREF (NC); 25–28 PC2..PC5 (spare)
 ```
 
 ---

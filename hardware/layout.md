@@ -36,6 +36,9 @@ and bottom stitched with vias.
   the ground on the via side; nothing routed under the crystals.
 - Analog ACC_SENSE: R9+R10 right at U1-23, keep away from D2's clamped 12 V
   spikes; add 100 nF (footprint C13 optional) at A0 if noise shows up.
+- Master-enable J5: short trace PC1(A1) → R11 → +5V rail; place J5 on the same
+  edge as J3/ICSP so it can be flicked with the board installed. Keep R11's GND
+  via clear of the ACC divider.
 - **GND**: unbroken pour both layers; vias every 5 mm near the bus/transceiver
   chain. Star the LDO GND back to the OBD GND pins 4/5.
 
@@ -55,6 +58,7 @@ termination*. Therefore:
 
 - Net names next to each pad (matches `netlist.md`).
 - `CANH` / `CANL` labels at J1.
+- `J5=OFF` silkscreen marker at the disable jumper (shunt in = features off).
 - LED polarity dots; U1 pin-1 dot; J2/J3 pin-order numbers.
 - "NissanAutoWindowCloser v1" + fw date + safety note sticker area.
 

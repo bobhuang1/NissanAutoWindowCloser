@@ -27,6 +27,7 @@ parts are generic and interchangeable. Prices approximate.
 | R8 | 10 kΩ 1/4 W | 0207 | 1 | MCP2551 RS → GND (high-speed) |
 | R9 | 10 kΩ 1/4 W | 0207 | 1 | ACC divider, bus side ~12 V |
 | R10 | 4.7 kΩ 1/4 W | 0207 | 1 | ACC divider, to GND (A0 ≈ 3.8–4.4 V with 12–14.4 V in) |
+| R11 | 10 kΩ 1/4 W | 0207 | 1 | master-enable pull-up on PC1/A1 |
 | C1 | 0.22 µF/50 V ceramic | 1206 | 1 | LM2940 input |
 | C2 | 22 µF/16 V electrolytic | 5 mm | 1 | LM2940 output (ESR ≤ 3 Ω — short-lead elec) |
 | C3,C4,C5,C6,C7 | 100 nF/50 V ceramic | 0805 | 5 | rail + each IC decoupling |
@@ -41,6 +42,7 @@ parts are generic and interchangeable. Prices approximate.
 | J2 | Header 2×3 0.1" (ICSP) | 2×3 | 1 | AVR ISP programming |
 | J3 | Header 1×6 0.1" (FTDI row) | 1×6 | 1 | UART: DTR RX TX VCC CTS GND |
 | J4 | JST-PH 2-pin (B2B-PH) | 2-pin | 1 | optional ACC pigtail |
+| J5 | Header 1×2 0.1" + jumper/shunt | 1×2 | 1 | master feature-disable (closed = OFF) |
 | K1 | Jumper 2×2 0.1" + shunt | 2×2 | 1 | select/kill CAN termination (default OPEN) |
 | K2 | 0 Ω (tie on same net w/ J1) | 1206 | 1 | selects J1 vs flying-lead header (leave 0 Ω) |
 | LED1 | Red 5 mm LED | 5 mm | 1 | power indicator |

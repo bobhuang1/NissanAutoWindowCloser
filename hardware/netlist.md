@@ -57,6 +57,14 @@ schematic in `schematic.md`.
 | `ACC_IN`    | ► J4-1 · R9 |
 | `ACC_SENSE` | ► R9 · R10 · U1-23 (PC0/A0) |
 
+## Master feature enable
+
+| Net | Nodes |
+| --- | --- |
+| `+5V`        | ► R11 · (rail as above) |
+| `FEATURE_EN` | ► R11 · U1-24 (PC1/A1) · J5-1 |
+| `GND`        | ► J5-2 · (rail as above) — J5 closed = disabled |
+
 ## Programming & status
 
 | Net | Nodes |

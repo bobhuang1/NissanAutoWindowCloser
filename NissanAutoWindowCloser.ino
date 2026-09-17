@@ -119,6 +119,12 @@
 #define HEADLIGHT_OFF_DATA  { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }  // placeholder
 #define HEADLIGHTS_HOLD_MS  1500UL             // keep on briefly after the last frame
 
+/* --- Master feature switch (integrated PCB only) --------------------------------
+ * J5 on the PCB shorts PC1/A1 to GND -> ALL automatic features pause (close,
+ * roll-down, door-hazard, brake-hazard). Manual serial commands still work.
+ * Set to -1 (not fitted) for breadboard / plug-in-module builds. */
+#define MASTER_ENABLE_PIN  A1
+
 /* --- STATUS / debug ---------------------------------------------------------- */
 #define STATUS_LED        9                    // integrated PCB LED2 -> PB1/D9 (NOT D13, that is SPI SCK!)
 #define LED_ACTIVE_HIGH   0                    // PCB: LED anode to +5V -> shines when pin is LOW. UNO built-in LED on D13 would be 1.
@@ -205,6 +211,8 @@ static uint8_t  _rxLen;
 static uint8_t  _rxData[8];
 static uint32_t _rxFrameId;
 
+static bool _enabled = true;                 // cleared by the master-disable switch
+
 /* ================================ SETUP ====================================== */
 void setup() {
   Serial.begin(115200);
@@ -212,6 +220,9 @@ void setup() {
 
   pinMode(STATUS_LED, OUTPUT);
   pinMode(ACC_SENSE_PIN, INPUT);
+#if MASTER_ENABLE_PIN >= 0
+  pinMode(MASTER_ENABLE_PIN, INPUT_PULLUP);  // J5 shorts to GND = disabled
+#endif
 
   // CAN controller on the bus (start-loopback is the library default -> force normal).
   if (CAN0.begin(CAN_SPEED, CAN_CLOCK) == CAN_OK) {
@@ -254,6 +265,9 @@ void setup() {
 
 /* ================================= LOOP ====================================== */
 void loop() {
+#if MASTER_ENABLE_PIN >= 0
+  pollMasterEnable();   // watch the physical kill-switch
+#endif
   readCanPipe();        // keep ears open (lock / door-lock events)
   pollAcc();            // ACC power-off events
   runPendingClose();    // fire the delayed close if it is due
@@ -282,14 +296,14 @@ static void pollAcc() {
         _accOn = false;
         Serial.println(F("ACC: OFF (debounced)"));
 #if TRIGGER_ACC_OFF
-        scheduleClose(F("ACC off"));
+        if (_enabled) scheduleClose(F("ACC off"));
 #endif
 #if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
         _hazardDemands = 0;                        // fresh car-off state
 #endif
 #if TRIGGER_HAZARD_ON_DOOR
         // Doors may already be open from when ACC was running — light up now.
-        if (_doorsOpen) _hazardDemands |= HAZARD_REQ_DOOR;
+        if (_enabled && _doorsOpen) _hazardDemands |= HAZARD_REQ_DOOR;
 #endif
       }
     } else {
@@ -332,6 +346,7 @@ static void readCanPipe() {
 /* --- Door lock / unlock frames ------------------------------------------------ */
 #if TRIGGER_DOOR_LOCK || TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
 static void handleLockFrame() {
+  if (!_enabled) return;                            // master switch off
   if (!frameIdMatches(LOCK_FRAME_ID, LOCK_FRAME_EXT)) return;
   if (_rxLen <= LOCK_BYTE) return;
 
@@ -387,6 +402,7 @@ static void handleUnlockBurst() {
 /* --- Door / tailgate status frames ---------------------------------------------- */
 #if TRIGGER_HAZARD_ON_DOOR
 static void handleDoorFrame() {
+  if (!_enabled) return;                            // master switch off
   if (!frameIdMatches(DOOR_FRAME_ID, DOOR_FRAME_EXT)) return;
   if (_rxLen <= DOOR_BYTE1) return;
 
@@ -426,6 +442,7 @@ static void handleDoorFrame() {
 /* --- Vehicle speed frames: detect a hard deceleration -> brake hazard ------ */
 #if TRIGGER_BRAKE_WARNING_LIGHTS
 static void handleSpeedFrame() {
+  if (!_enabled) return;                            // master switch off
   if (!frameIdMatches(SPEED_FRAME_ID, SPEED_FRAME_EXT)) return;
   if (_rxLen <= SPEED_BYTE) return;
   if (!_accOn) return;                             // car not running -> no brake warning
@@ -513,6 +530,7 @@ static void scheduleRollDown(const char *reason) {
 
 static void runPendingRollDown() {
   if (_openAtMs == 0) return;
+  if (!_enabled) { _openAtMs = 0; return; }        // disabled mid-timer: cancel
   if ((long)(millis() - _openAtMs) < 0) return;   // not yet (millis wrap-safe)
   _openAtMs = 0;
   openAllWindows(_openReason);
@@ -521,6 +539,7 @@ static void runPendingRollDown() {
 
 static void runPendingClose() {
   if (_closeAtMs == 0) return;
+  if (!_enabled) { _closeAtMs = 0; return; }       // disabled mid-timer: cancel
   if ((long)(millis() - _closeAtMs) < 0) return;   // not yet (millis wrap-safe)
   _closeAtMs = 0;
   closeAllWindows(_closeReason);
@@ -624,6 +643,18 @@ static bool frameIdMatches(uint32_t id, uint8_t ext) {
 static unsigned long readAccMv() {
   return (unsigned long)analogRead(ACC_SENSE_PIN) * 5000UL / 1023UL;
 }
+
+/* Physical kill-switch (PCB J5): low -> every automatic feature pauses. */
+#if MASTER_ENABLE_PIN >= 0
+static void pollMasterEnable() {
+  bool en = (digitalRead(MASTER_ENABLE_PIN) == HIGH);
+  if (en != _enabled) {
+    _enabled = en;
+    Serial.println(en ? F("Master enable ON")
+                      : F("Master enable OFF (all auto features paused)"));
+  }
+}
+#endif
 
 static void blink(uint8_t times, uint16_t halfPeriodMs) {
   for (uint8_t i = 0; i < times; i++) {

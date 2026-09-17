@@ -50,6 +50,9 @@ The firmware (root of this repo) needs no change; only `CAN_CLOCK` as above.
   tap.
 - **Programming**: standard 6-pin ICSP header + 6-pin UART header (FTDI), LED
   on ACT, reset button.
+- **Feature kill-switch**: J5 jumper on PC1/A1 (with R11 pull-up). Shunt in =
+  all automatic features disabled — put it on for maintenance/valet/pinch
+  safety. Firmware gates against the same pin (`MASTER_ENABLE_PIN`).
 
 ## Design files in this folder
 

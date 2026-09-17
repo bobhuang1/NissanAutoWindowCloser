@@ -116,6 +116,9 @@ safe by swapping to the genuine command once sniffed.
 - Auto roll-down (triple unlock): it also opens the car to rain/theft — keep
   `TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK` off until the unlock frame is verified
   and confirm the burst gate behaves on *your* key fob.
+- The integrated PCB has a physical kill-switch (J5, shorts PC1/A1 → GND,
+  firmware `MASTER_ENABLE_PIN`). Use it for valet, car washes and any
+  maintenance so no automatic behavior can fire.
 - Tapping the CAN bus of a car: prefer a T-junction and keep terminations as
   they are; never loop or cut the bus wires.
 - Verify both divider and CAN transceiver before powering anything from the
