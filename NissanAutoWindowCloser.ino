@@ -11,6 +11,10 @@
  *      and switch them back off once everything is closed.
  *   4. If 3 "unlock" signals arrive within 3 s while the car is parked/locked,
  *      roll all 4 windows down automatically.
+ *   5. While the car is running, a hard deceleration (speed drop above the
+ *      DECEL threshold) flashes the hazards for 10 s to warn cars behind.
+ *   6. During every automatic window-close, the headlights come on and go back
+ *      off when the sequence is fully done.
  *
  * WARNING — sample / proof-of-concept only.
  *   The CAN frame IDs and payload bytes below are PLACEHOLDERS. They are NOT
@@ -93,6 +97,28 @@
 #define HAZARD_ON_DATA    { 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00 }  // placeholder
 #define HAZARD_OFF_DATA   { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }  // placeholder
 
+/* --- Brake-hazard: flash the hazards on a hard deceleration ------------------- */
+#define TRIGGER_BRAKE_WARNING_LIGHTS 1         // car running + fast decel -> 10 s hazards
+#define SPEED_FRAME_ID     0x1D0UL             // placeholder: vehicle speed frame
+#define SPEED_FRAME_EXT    0
+#define SPEED_BYTE         1                   // byte that holds vehicle speed
+#define SPEED_SCALE        1                   // km/h per raw unit (placeholder)
+#define MIN_SPEED_KMH      20                  // below this speed no brake warning
+#define DECEL_THRESHOLD_KMPHS 25UL             // km/h lost per second to trigger
+#define DECEL_MIN_DT_MS    100UL               // ignore sub-100 ms glitches
+#define DECEL_MAX_DT_MS    2000UL              // ignore long gaps / edge cases
+#define BRAKE_HAZARD_MS    10000UL             // how long the hazards flash
+#define BRAKE_COOLDOWN_MS  20000UL             // min pause before re-triggering
+
+/* --- Headlights during the automatic window-close ----------------------------- */
+#define LIGHTS_WHILE_CLOSE 1                   // turn on headlights while closing
+#define HEADLIGHT_FRAME_ID  0x2C0UL            // placeholder: BCM headlamp request
+#define HEADLIGHT_FRAME_EXT 0
+#define HEADLIGHT_DLC       8
+#define HEADLIGHT_ON_DATA   { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 }  // placeholder
+#define HEADLIGHT_OFF_DATA  { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }  // placeholder
+#define HEADLIGHTS_HOLD_MS  1500UL             // keep on briefly after the last frame
+
 /* --- STATUS / debug ---------------------------------------------------------- */
 #define STATUS_LED        9                    // integrated PCB LED2 -> PB1/D9 (NOT D13, that is SPI SCK!)
 #define LED_ACTIVE_HIGH   0                    // PCB: LED anode to +5V -> shines when pin is LOW. UNO built-in LED on D13 would be 1.
@@ -157,7 +183,22 @@ static unsigned long _unlockWindowStartMs = 0;  // when the first unlock landed
 static bool _doorsOpen            = false;      // debounced door/tailgate state
 static bool _doorDebouncePending  = false;      // edge seen, debounce running
 static unsigned long _doorsChangeAtMs = 0;
-static bool _hazardsOn            = false;      // last hazard command we TX'd
+#endif
+
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
+static bool    _hazardsOn        = false;      // last hazard command we TX'd
+static uint8_t _hazardDemands    = 0;          // OR of hazard requests
+#define HAZARD_REQ_DOOR    0x01
+#define HAZARD_REQ_BRAKE   0x02
+#define HAZARD_REQ_MANUAL  0x04
+#endif
+
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+static bool         _brakeHazardsActive = false;
+static unsigned long _brakeHazardUntilMs  = 0;
+static unsigned long _brakeCooldownUntilMs = 0;
+static unsigned long _lastSpeedKmh = 0;        // previous speed sample
+static unsigned long _lastSpeedAtMs = 0;       // when it was sampled
 #endif
 
 static uint8_t  _rxLen;
@@ -192,6 +233,13 @@ void setup() {
   Serial.print(F("Door status frame: 0x")); Serial.println(DOOR_FRAME_ID, HEX);
   Serial.print(F("Hazard frame: 0x"));      Serial.println(HAZARD_FRAME_ID, HEX);
 #endif
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+  Serial.print(F("Speed frame: 0x"));       Serial.println(SPEED_FRAME_ID, HEX);
+  Serial.print(F("Decel threshold: "));     Serial.print(DECEL_THRESHOLD_KMPHS); Serial.println(F(" km/h per s"));
+#endif
+#if LIGHTS_WHILE_CLOSE
+  Serial.print(F("Headlight frame: 0x"));   Serial.println(HEADLIGHT_FRAME_ID, HEX);
+#endif
 
   // Initial state, so we can detect a falling edge later.
   _accOn = (readAccMv() >= ACC_OFF_MV);
@@ -212,6 +260,12 @@ void loop() {
 #if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
   runPendingRollDown(); // fire the delayed roll-down if it is due
 #endif
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+  pollBrakeWarning();   // count down an active brake-hazard burst
+#endif
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
+  updateHazards();      // reconcile all hazard requests -> one TX on change
+#endif
   handleSerial();       // manual test commands over USB
 }
 
@@ -230,17 +284,24 @@ static void pollAcc() {
 #if TRIGGER_ACC_OFF
         scheduleClose(F("ACC off"));
 #endif
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
+        _hazardDemands = 0;                        // fresh car-off state
+#endif
 #if TRIGGER_HAZARD_ON_DOOR
-        // Doors may already be open from while the ACC was running — light up now.
-        if (_doorsOpen) setHazards(true);
+        // Doors may already be open from when ACC was running — light up now.
+        if (_doorsOpen) _hazardDemands |= HAZARD_REQ_DOOR;
 #endif
       }
     } else {
       _accLowSinceMs = 0;
       _accOn = true;
       Serial.println(F("ACC: ON"));
-#if TRIGGER_HAZARD_ON_DOOR
-      setHazards(false);                        // parking light job is done
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
+      _hazardDemands = 0;                          // driving resets every hazard request
+#endif
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+      _brakeHazardsActive = false;
+      _lastSpeedAtMs = 0;                          // re-arm the speed tracker
 #endif
 #if TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK
       _unlockCount = 0;                         // a fresh drive resets the unlock burst
@@ -262,6 +323,9 @@ static void readCanPipe() {
 #endif
 #if TRIGGER_HAZARD_ON_DOOR
   handleDoorFrame();
+#endif
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+  handleSpeedFrame();
 #endif
 }
 
@@ -351,10 +415,61 @@ static void handleDoorFrame() {
     if (HAZARD_ONLY_WHEN_PARKED && _accOn) {
       Serial.println(F("(parked-only: hazards skipped while driving)"));
     } else {
-      setHazards(true);
+      _hazardDemands |= HAZARD_REQ_DOOR;
     }
   } else {
-    setHazards(false);
+    _hazardDemands &= ~HAZARD_REQ_DOOR;
+  }
+}
+#endif
+
+/* --- Vehicle speed frames: detect a hard deceleration -> brake hazard ------ */
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+static void handleSpeedFrame() {
+  if (!frameIdMatches(SPEED_FRAME_ID, SPEED_FRAME_EXT)) return;
+  if (_rxLen <= SPEED_BYTE) return;
+  if (!_accOn) return;                             // car not running -> no brake warning
+
+  unsigned long now  = millis();
+  unsigned long spd  = (unsigned long)_rxData[SPEED_BYTE] * SPEED_SCALE;
+
+  if (_lastSpeedAtMs != 0) {
+    unsigned long dt = now - _lastSpeedAtMs;     // unsigned diff is wrap-safe
+    if (dt >= DECEL_MIN_DT_MS && dt <= DECEL_MAX_DT_MS && spd < _lastSpeedKmh) {
+      unsigned long dropPerSec = (_lastSpeedKmh - spd) * 1000UL / dt;
+
+      if (dropPerSec >= DECEL_THRESHOLD_KMPHS && spd >= MIN_SPEED_KMH
+          && !_brakeHazardsActive && now >= _brakeCooldownUntilMs) {
+        Serial.print(F("Hard deceleration: lost "));
+        Serial.print(_lastSpeedKmh - spd);
+        Serial.println(F(" km/h across the sample window"));
+        startBrakeWarning(now);
+      }
+    }
+  }
+
+  _lastSpeedKmh    = spd;
+  _lastSpeedAtMs   = now;
+}
+
+static void startBrakeWarning(unsigned long now) {
+  _brakeHazardsActive   = true;
+  _brakeHazardUntilMs   = now + BRAKE_HAZARD_MS;
+  _brakeCooldownUntilMs = now + BRAKE_HAZARD_MS + BRAKE_COOLDOWN_MS;
+  _hazardDemands |= HAZARD_REQ_BRAKE;
+  Serial.print(F("Brake hazard ON for "));
+  Serial.print(BRAKE_HAZARD_MS);
+  Serial.println(F(" ms"));
+}
+
+/* Count down the brake burst; clearing the demand lets updateHazards turn off. */
+static void pollBrakeWarning() {
+  if (!_brakeHazardsActive) return;
+  unsigned long now = millis();
+  if ((long)(now - _brakeHazardUntilMs) >= 0) {   // wrap-safe timer
+    _brakeHazardsActive = false;
+    _hazardDemands &= ~HAZARD_REQ_BRAKE;
+    Serial.println(F("Brake hazard OFF"));
   }
 }
 #endif
@@ -411,17 +526,31 @@ static void runPendingClose() {
   closeAllWindows(_closeReason);
 }
 
-/* Send every "up" frame in WINDOWS_UP[]. */
+/* Send every "up" frame in WINDOWS_UP[]. Headlights guard the whole sequence. */
 static void closeAllWindows(const char *reason) {
   Serial.print(F("Closing all windows ("));
   Serial.print(reason ? reason : "manual");
   Serial.println(F(")"));
+
+#if LIGHTS_WHILE_CLOSE
+  static const uint8_t hlOnData[HEADLIGHT_DLC]  = HEADLIGHT_ON_DATA;
+  static const uint8_t hlOffData[HEADLIGHT_DLC] = HEADLIGHT_OFF_DATA;
+  sendFrame(HEADLIGHT_FRAME_ID, HEADLIGHT_FRAME_EXT, HEADLIGHT_DLC,
+            hlOnData, "headlights ON");
+#endif
 
   for (uint8_t w = 0; w < NUM_WINDOWS_UP; w++) {
     const WinFrame &wf = WINDOWS_UP[w];
     sendFrame(wf.id, wf.ext, wf.dlc, wf.data, wf.name);
     delay(CLOSE_SPACING_MS);
   }
+
+#if LIGHTS_WHILE_CLOSE
+  delay(HEADLIGHTS_HOLD_MS);                     // let the last frame finish the roll
+  sendFrame(HEADLIGHT_FRAME_ID, HEADLIGHT_FRAME_EXT, HEADLIGHT_DLC,
+            hlOffData, "headlights OFF");
+#endif
+
   Serial.println(F("Close sequence done"));
 }
 
@@ -466,18 +595,19 @@ static bool sendFrame(uint32_t id, uint8_t ext, uint8_t dlc,
   return false;
 }
 
-/* Hazard demand. Sends only on change; BCM keeps the lights while demanded. */
-#if TRIGGER_HAZARD_ON_DOOR
-static void setHazards(bool on) {
-  if (on == _hazardsOn) return;
+/* Reconcile all hazard requests (door / brake / manual) -> one TX on change. */
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
+static void updateHazards() {
+  bool want = (_hazardDemands != 0);
+  if (want == _hazardsOn) return;
 
   static const uint8_t hazOnData[HAZARD_DLC]  = HAZARD_ON_DATA;
   static const uint8_t hazOffData[HAZARD_DLC] = HAZARD_OFF_DATA;
 
   sendFrame(HAZARD_FRAME_ID, HAZARD_FRAME_EXT, HAZARD_DLC,
-            on ? hazOnData : hazOffData,
-            on ? "hazards ON" : "hazards OFF");
-  _hazardsOn = on;
+            want ? hazOnData : hazOffData,
+            want ? "hazards ON" : "hazards OFF");
+  _hazardsOn = want;
 }
 #endif
 
@@ -518,14 +648,14 @@ static void handleSerial() {
       openAllWindows("serial-cmd");
       break;
 #endif
-#if TRIGGER_HAZARD_ON_DOOR
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
     case 'd':
     case 'D':
-      setHazards(true);
+      _hazardDemands |= HAZARD_REQ_MANUAL;       // reconciled by loop()'s updateHazards()
       break;
     case 'f':
     case 'F':
-      setHazards(false);
+      _hazardDemands &= ~HAZARD_REQ_MANUAL;
       break;
 #endif
     case 'a':
@@ -541,7 +671,14 @@ static void handleSerial() {
 #endif
 #if TRIGGER_HAZARD_ON_DOOR
       Serial.print(F("Door/tailgate open: ")); Serial.println(_doorsOpen ? F("yes") : F("no"));
-      Serial.print(F("Hazards TX demand: ")); Serial.println(_hazardsOn ? F("on") : F("off"));
+#endif
+#if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
+      Serial.print(F("Hazard demands: 0x"));    Serial.println(_hazardDemands, HEX);
+      Serial.print(F("Hazards TX: "));          Serial.println(_hazardsOn ? F("on") : F("off"));
+#endif
+#if TRIGGER_BRAKE_WARNING_LIGHTS
+      Serial.print(F("Last speed km/h: "));     Serial.println(_lastSpeedKmh);
+      Serial.print(F("Brake hazard active: ")); Serial.println(_brakeHazardsActive ? F("yes") : F("no"));
 #endif
       break;
     case 'h':

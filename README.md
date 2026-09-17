@@ -30,8 +30,19 @@ Four configurable behaviors, each with its own `TRIGGER_*` switch:
    `TRIPLE_UNLOCK_WINDOW_MS` (3 s, while ACC is off) roll every window down via
    `WINDOWS_DOWN[]` after `ROLL_DOWN_DELAY_MS`. A fresh lock event or an ACC-on
    resets the burst counter.
-4. **Cooldown** — `EVENT_COOLDOWN_MS` stops a close/roll-down echo from
-   repeating every identical bus frame. Hazard toggling is independent.
+4. **Hazards on a hard deceleration** — `TRIGGER_BRAKE_WARNING_LIGHTS`, while
+   ACC is on: vehicle speed is parsed from `SPEED_FRAME_ID` (`SPEED_BYTE ×
+   SPEED_SCALE` km/h); if the instantaneous drop rate reaches
+   `DECEL_THRESHOLD_KMPHS` km/h per second (above `MIN_SPEED_KMH`), the hazards
+   flash for `BRAKE_HAZARD_MS` (10 s). `BRAKE_COOLDOWN_MS` stops echo storms.
+   Speed sample gaps outside `DECEL_MIN_DT_MS`..`DECEL_MAX_DT_MS` are ignored.
+5. **Headlights while auto-closing** — `LIGHTS_WHILE_CLOSE`: `closeAllWindows`
+   sends the `HEADLIGHT_FRAME_ID` "on" frame first, then "off" after the last
+   window frame plus `HEADLIGHTS_HOLD_MS`, so the lights mark the whole close.
+6. **Cooldown** — `EVENT_COOLDOWN_MS` stops a close/roll-down echo from
+   repeating every identical bus frame. Hazards are demand-driven (door /
+   brake / manual bits OR'd together) and reconcile in `loop()`, so several
+   sources never fight over the hazard frame.
 
 USB serial doubles as a test rig before the car install: `c` closes windows,
 `o` rolls them down, `d`/`f` hazards on/off, `a` prints live ACC millivolts,
@@ -82,10 +93,14 @@ pio run -e nanoatmega328 -t upload
    examples) onto the Nano instead of this sketch.
 2. With the car running, operate each window switch **up** and watch which IDs
    appear on the bus; do the same for the driver-door lock / key-fob lock. Then
-   open each door and the tailgate to log the door-status frame bits.
+   open each door and the tailgate to log the door-status frame bits. Press the
+   hazard stalk and the headlight stalk while logging — those become the hazard
+   and headlight request frames. Bring a helper to log the speed frame during a
+   hard brake.
 3. Note the ID, extended bit, and which payload bytes change.
-4. Fill in `LOCK_FRAME_*`, `DOOR_FRAME_*`, `HAZARD_FRAME_*` and the
-   `WINDOWS_UP[]` / `WINDOWS_DOWN[]` tables accordingly.
+4. Fill in `LOCK_FRAME_*`, `DOOR_FRAME_*`, `HAZARD_FRAME_*`, `SPEED_FRAME_*`,
+   `HEADLIGHT_FRAME_*` and the `WINDOWS_UP[]` / `WINDOWS_DOWN[]` tables
+   accordingly.
 
 On many Nissans the windows are actually driven over **LIN** with the body
 computer (BCM) as master — in that case send the *BCM's* "roll windows up"
