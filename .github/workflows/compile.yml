@@ -30,4 +30,4 @@ jobs:
           printf '#include "LiquidCrystal_I2C.h"\n' > "$HOME/.arduino15/libraries/LiquidCrystal_I2C_Arduino/LiquidCrystal_I2C_Arduino.h"
 
       - name: Compile
-        run: arduino-cli compile --fqbn esp8266:esp8266:d1_mini --warnings none NissanAutoWindowCloser
+        run: arduino-cli compile --fqbn esp8266:esp8266:d1_mini --warnings none .
