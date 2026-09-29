@@ -1047,16 +1047,22 @@ static bool bcmCommand(uint32_t id, uint8_t lid, uint8_t func, uint8_t val,
                ((long)(millis() - _lastCmdMs) < (long)BCM_REUSE_MS);
 
   if (!reuse) {
-    sendFrame(id, 0, 8, sessOn, "diag session C0");
+    bool sessionOk = sendFrame(id, 0, 8, sessOn, "diag session C0");
     delay(BCM_GAP_MS);
+    _sessionOpen = sessionOk;   // only claim an open session if the frame actually went out
+    _lastCmdId   = id;
+    if (!_sessionOpen) {
+      // Without the session the BCM ignores the $30 payload anyway, so there is
+      // no point sending it (and no stale "open" state to mislead reuse logic).
+      Serial.println(F("  diag session failed to send - command aborted"));
+      return false;
+    }
   }
 
   bool ok = sendFrame(id, 0, 8, data, what);
   delay(BCM_GAP_MS);
 
-  _sessionOpen = true;
-  _lastCmdId   = id;
-  _lastCmdMs   = millis();
+  _lastCmdMs = millis();
   return ok;
 }
 
