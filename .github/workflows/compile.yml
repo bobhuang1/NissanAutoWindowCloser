@@ -1,0 +1,33 @@
+name: Compile NissanAutoWindowCloser
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sketch
+        uses: actions/checkout@v4
+
+      - name: Setup arduino-cli 1.5.1
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.1
+
+      - name: Install platforms and libraries
+        run: |
+          URL="https://arduino.esp8266.com/stable/package_esp8266com_index.json"
+          arduino-cli core update-index --additional-urls "$URL"
+          arduino-cli core install esp8266:esp8266@3.1.2 --additional-urls "$URL"
+          arduino-cli core install arduino:avr@1.8.8
+          arduino-cli lib install "U8g2@2.36.19" "DHT sensor library@1.4.7" "WiFiManager@2.0.17" "Timezone@1.3.1" "Json Streaming Parser@1.0.5" "TM1637TinyDisplay@1.12.2" "TinyGPSPlus@1.0.3" "RTClib@2.1.4"
+          arduino-cli lib install mcp_can@1.5.1
+          git clone --depth 1 https://github.com/bobhuang1/LiquidCrystal_I2C.git "$HOME/.arduino15/libraries/LiquidCrystal_I2C_Arduino"
+          printf '#include "LiquidCrystal_I2C.h"\n' > "$HOME/.arduino15/libraries/LiquidCrystal_I2C_Arduino/LiquidCrystal_I2C_Arduino.h"
+
+      - name: Compile
+        run: arduino-cli compile --fqbn esp8266:esp8266:d1_mini --warnings none NissanAutoWindowCloser
