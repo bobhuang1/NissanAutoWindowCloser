@@ -495,7 +495,7 @@ void setup() {
   else {
     Serial.println(F("ACC: OFF at boot"));
 #if AUTO_CLOSE_AT_BOOT
-    scheduleClose(F("ACC off at boot"));
+    scheduleClose("ACC off at boot");
 #endif
   }
 }
@@ -552,7 +552,7 @@ static void setAccState(bool on) {
 #endif
   } else {
 #if TRIGGER_ACC_OFF
-    if (_enabled) scheduleClose(F("ACC off"));
+    if (_enabled) scheduleClose("ACC off");
 #endif
 #if TRIGGER_HAZARD_ON_DOOR || TRIGGER_BRAKE_WARNING_LIGHTS
     _hazardDemands &= (uint8_t)~(HAZARD_REQ_DOOR | HAZARD_REQ_BRAKE);
@@ -734,7 +734,7 @@ static void onCarLocked(void) {
   // Only react while the car is off: locking while driving should not close windows.
   if (_enabled && !_accOn) {
     Serial.println(F("Lock event while ACC off -> close"));
-    scheduleClose(F("door lock"));
+    scheduleClose("door lock");
   }
 #endif
 }
@@ -770,7 +770,7 @@ static void handleUnlockBurst(void) {
   if (_unlockCount >= 3) {
     _unlockCount = 0;
     Serial.println(F("Triple unlock detected -> roll windows down"));
-    scheduleRollDown(F("triple unlock"));
+    scheduleRollDown("triple unlock");
   }
 }
 #endif
