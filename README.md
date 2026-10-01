@@ -193,3 +193,8 @@ why the tables are disabled.
   cut or loop the bus wires.
 - Verify the divider and the transceiver before powering anything from the car's
   rails.
+
+
+## License
+
+This project is free software, released under the **GNU General Public License v3.0**. You may redistribute and/or modify it under those terms; see [LICENSE.md](LICENSE.md) for the full text.
