@@ -156,12 +156,23 @@
 #define TRIGGER_ACC_OFF   1                    // close when ACC switches OFF
 #define TRIGGER_DOOR_LOCK 1                    // close when the doors lock while ACC OFF
 #define TRIGGER_HAZARD_ON_DOOR 1               // hazards while any door/trunk is open (parked)
-#define TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK 1   // 3 unlocks in <3 s -> all windows down
-#define TRIGGER_BRAKE_WARNING_LIGHTS 1         // car running + fast decel -> 10 s hazards
+#define TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK 0   // 3 unlocks in <3 s -> all windows down.
+                                               // Off: it counts lock-status EDGES, and repeated
+                                               // fob unlock presses produce only one edge (the
+                                               // car is already unlocked), so it cannot fire
+                                               // until the fob's unlock button frame is sniffed
+                                               // and counted instead. See README.
+#define TRIGGER_BRAKE_WARNING_LIGHTS 0         // car running + fast decel -> 10 s hazards.
+                                               // Off by default: it drives the indicators through
+                                               // a BCM diagnostic override WHILE DRIVING and can
+                                               // only alternate left/right, not flash both. See
+                                               // the README Safety section before enabling.
 #define TRIGGER_HORN_ON_LOCK   1               // 1 x 0.5 s honk when the car locks
 #define TRIGGER_HORN_ON_UNLOCK 1               // 2 x 0.5 s honks when the car unlocks
 #define TRIGGER_AUTO_RELOCK 1                  // re-lock if nobody opened a door
-#define LIGHTS_WHILE_CLOSE 1                   // turn on headlights while closing
+#define LIGHTS_WHILE_CLOSE 1                   // turn on headlights while closing (only once
+                                               // WINDOW_FRAMES_VERIFIED = 1: no point flashing
+                                               // the beams when no window frame is sent)
 #define TRIGGER_CAN_MONITOR 0                  // 1 = allow 'm' to print every frame
 
 /* --- Roll windows down after a triple unlock -------------------------------- */
@@ -287,7 +298,8 @@ static const WinFrame WINDOWS_DOWN[] = {
 /* ============================== STATE ======================================== */
 MCP_CAN CAN0(SPI_CS_PIN);
 
-static unsigned long _nextEventMs = 0;          // millis() gate for EVENT_COOLDOWN_MS
+static bool          _haveEvent   = false;      // an automatic close/roll-down has run
+static unsigned long _lastEventMs = 0;          // when it was scheduled (EVENT_COOLDOWN_MS gate)
 static unsigned long _closeAtMs   = 0;          // pending close timer
 static const char  *_closeReason  = nullptr;    // reason for the pending close
 
@@ -332,7 +344,8 @@ static unsigned long _nextHazardToggleMs = 0;
 #if TRIGGER_BRAKE_WARNING_LIGHTS
 static bool         _brakeHazardsActive = false;
 static unsigned long _brakeHazardUntilMs  = 0;
-static unsigned long _brakeCooldownUntilMs = 0;
+static bool          _haveBrakeWarning = false;  // a brake warning has fired at least once
+static unsigned long _brakeStartedAtMs  = 0;      // when the last one started (cooldown gate)
 static unsigned long _lastSpeedX10   = 0;       // previous sample, in tenths of km/h
 static unsigned long _lastSpeedAtMs = 0;       // when it was sampled
 #endif
@@ -803,13 +816,22 @@ static void handleSpeedFrame(void) {
                     | ((unsigned long)_rxData[SPEED_BYTE_HI] << 8);
   unsigned long spdX10 = (raw * 10UL) / SPEED_CMH_PER_COUNT;   // tenths of km/h
 
-  if (_lastSpeedAtMs != 0) {
-    unsigned long dt = now - _lastSpeedAtMs;     // unsigned diff is wrap-safe
-    if (dt >= DECEL_MIN_DT_MS && dt <= DECEL_MAX_DT_MS && spdX10 < _lastSpeedX10) {
+  // The baseline only moves on once DECEL_MIN_DT_MS has passed. 0x284 repeats every few
+  // tens of milliseconds, so comparing each frame with the previous one never saw a gap
+  // of 100 ms or more and the detector could not fire.
+  unsigned long dt = now - _lastSpeedAtMs;       // unsigned diff is wrap-safe
+  if (_lastSpeedAtMs != 0 && dt < DECEL_MIN_DT_MS) {
+    return;                                      // keep the older baseline
+  }
+
+  if (_lastSpeedAtMs != 0 && dt <= DECEL_MAX_DT_MS) {
+    if (spdX10 < _lastSpeedX10) {
       unsigned long dropPerSecX10 = (_lastSpeedX10 - spdX10) * 1000UL / dt;
+      bool coolingDown = _haveBrakeWarning
+                         && now - _brakeStartedAtMs < BRAKE_HAZARD_MS + BRAKE_COOLDOWN_MS;
 
       if (dropPerSecX10 >= DECEL_THRESHOLD_KMPHS_X10 && spdX10 >= MIN_SPEED_KMH_X10
-          && !_brakeHazardsActive && now >= _brakeCooldownUntilMs) {
+          && !_brakeHazardsActive && !coolingDown) {
         Serial.print(F("Hard deceleration: lost "));
         Serial.print((_lastSpeedX10 - spdX10) / 10UL);
         Serial.print(F("."));
@@ -827,7 +849,8 @@ static void handleSpeedFrame(void) {
 static void startBrakeWarning(unsigned long now) {
   _brakeHazardsActive   = true;
   _brakeHazardUntilMs   = now + BRAKE_HAZARD_MS;
-  _brakeCooldownUntilMs = now + BRAKE_HAZARD_MS + BRAKE_COOLDOWN_MS;
+  _haveBrakeWarning     = true;
+  _brakeStartedAtMs     = now;
   _hazardDemands |= HAZARD_REQ_BRAKE;
   Serial.print(F("Brake hazard ON for "));
   Serial.print(BRAKE_HAZARD_MS);
@@ -932,11 +955,14 @@ static void reArmRelock(void) {
 /* Schedule one close sequence EVENT_COOLDOWN_MS after the previous one. */
 static void scheduleClose(const char *reason) {
   unsigned long now = millis();
-  if (now < _nextEventMs) {
+  // Unsigned "elapsed" arithmetic stays correct across the 49.7-day millis() wrap; the
+  // old "now < deadline" test blocked every automatic close for up to 49 days after it.
+  if (_haveEvent && now - _lastEventMs < EVENT_COOLDOWN_MS) {
     Serial.println(F("(cooldown active, skipping)"));
     return;
   }
-  _nextEventMs = now + EVENT_COOLDOWN_MS;
+  _haveEvent   = true;
+  _lastEventMs = now;
   _closeAtMs   = now + CLOSE_DELAY_MS;
   _closeReason = reason;
   Serial.print(F("Will close windows in "));
@@ -950,11 +976,14 @@ static void scheduleClose(const char *reason) {
 /* Schedule one roll-down, also gated by the shared EVENT_COOLDOWN_MS. */
 static void scheduleRollDown(const char *reason) {
   unsigned long now = millis();
-  if (now < _nextEventMs) {
+  // Unsigned "elapsed" arithmetic stays correct across the 49.7-day millis() wrap; the
+  // old "now < deadline" test blocked every automatic close for up to 49 days after it.
+  if (_haveEvent && now - _lastEventMs < EVENT_COOLDOWN_MS) {
     Serial.println(F("(cooldown active, skipping)"));
     return;
   }
-  _nextEventMs = now + EVENT_COOLDOWN_MS;
+  _haveEvent   = true;
+  _lastEventMs = now;
   _openAtMs    = now + ROLL_DOWN_DELAY_MS;
   _openReason  = reason;
   Serial.print(F("Will roll windows down in "));
@@ -987,7 +1016,7 @@ static void closeAllWindows(const char *reason) {
   Serial.print(reason ? reason : "manual");
   Serial.println(F(")"));
 
-#if LIGHTS_WHILE_CLOSE
+#if LIGHTS_WHILE_CLOSE && WINDOW_FRAMES_VERIFIED
   bcmCommand(BCM_CMD_ID, LID_BEAM, BEAM_FUNC, BEAM_ON, "headlights ON");
 #endif
 
@@ -1002,7 +1031,7 @@ static void closeAllWindows(const char *reason) {
   Serial.println(F("!! no public Nissan window command frame exists - sniff yours"));
 #endif
 
-#if LIGHTS_WHILE_CLOSE
+#if LIGHTS_WHILE_CLOSE && WINDOW_FRAMES_VERIFIED
   delay(HEADLIGHTS_HOLD_MS);                     // let the last frame finish the roll
   bcmCommand(BCM_CMD_ID, LID_BEAM, BEAM_FUNC, BEAM_OFF, "headlights OFF");
 #endif

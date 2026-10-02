@@ -88,15 +88,21 @@ Each behaviour has its own `TRIGGER_*` switch in the CONFIG block.
    arms it when the car is already unlocked when the module boots.
 5. **Hazards on with any open door** — `TRIGGER_HAZARD_ON_DOOR`, debounced by
    `DOOR_DEBOUNCE_MS`, `HAZARD_ONLY_WHEN_PARKED` keeps it to a parked car.
-6. **Roll windows down on a triple unlock** — `TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK`:
-   three unlock events inside `TRIPLE_UNLOCK_WINDOW_MS` (3 s) while ACC is off.
-7. **Hazards on a hard deceleration** — `TRIGGER_BRAKE_WARNING_LIGHTS`: speed from
+6. **Roll windows down on a triple unlock** — `TRIGGER_ROLL_DOWN_ON_TRIPLE_UNLOCK`,
+   **off by default**: three unlock events inside `TRIPLE_UNLOCK_WINDOW_MS` (3 s)
+   while ACC is off. It counts lock-status *edges*, and pressing unlock repeatedly
+   on the fob gives only one edge (the car is already unlocked; Nissan's two-stage
+   unlock still reports "locked" after the first press), so it cannot fire until it
+   counts the fob's unlock button frame instead. Sniff that frame first.
+7. **Hazards on a hard deceleration** — `TRIGGER_BRAKE_WARNING_LIGHTS`, **off by
+   default** (see Safety): speed from
    `0x284`; if the drop rate reaches `DECEL_THRESHOLD_KMPHS_X10` (25 km/h per
    second) above `MIN_SPEED_KMH_X10` (20 km/h), the hazards flash for
    `BRAKE_HAZARD_MS`. Sample gaps outside `DECEL_MIN_DT_MS`..`DECEL_MAX_DT_MS` are
    ignored and `BRAKE_COOLDOWN_MS` stops echo storms.
 8. **Headlights while auto-closing** — `LIGHTS_WHILE_CLOSE` beams on, window
-   frames, then beams off after `HEADLIGHTS_HOLD_MS`.
+   frames, then beams off after `HEADLIGHTS_HOLD_MS`. Only active once
+   `WINDOW_FRAMES_VERIFIED = 1`.
 9. **Cooldown** — `EVENT_COOLDOWN_MS` stops a close/roll-down echo from repeating.
    Hazards are demand-driven (door / brake / manual bits OR'd together) and
    reconcile every `loop()`, so sources never fight over the indicator command.
@@ -175,6 +181,13 @@ why the tables are disabled.
    ignition `IGN_MASK` / `IGN_SHIFT`) to what you actually saw.
 
 ## Safety
+
+- **Brake hazards act while the car is moving.** They open the BCM's extended
+  diagnostic session and drive the indicators through `$30` IO-control at speed;
+  while that override is active the BCM may ignore the driver's own stalk. LID
+  `0x4C` drives one side at a time, so following traffic sees left/right
+  alternating turn signals, not a hazard flash. This is why the feature ships
+  disabled - only enable it after verifying both effects on your car.
 
 - **Auto-close is the dangerous one**: a hand, arm or child in the way is worse
   with a motor, not better. Keep the master kill-switch within reach and add a
